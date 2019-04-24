@@ -41,6 +41,7 @@ use std::env;
 #[cfg(not(windows))]
 use std::os::unix::io::AsRawFd;
 
+use alacritty::clipboard::Clipboard;
 use alacritty::config::{self, Config, Monitor};
 use alacritty::display::Display;
 use alacritty::event_loop::{self, EventLoop, Msg};
@@ -137,12 +138,18 @@ fn run(
 
     info!("PTY Dimensions: {:?} x {:?}", display.size().lines(), display.size().cols());
 
+    // Create new native clipboard
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let clipboard = Clipboard::new(display.get_wayland_display());
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let clipboard = Clipboard::new();
+
     // Create the terminal
     //
     // This object contains all of the state about what's being displayed. It's
     // wrapped in a clonable mutex since both the I/O loop and display need to
     // access it.
-    let terminal = Term::new(&config, display.size().to_owned(), message_buffer);
+    let terminal = Term::new(&config, display.size().to_owned(), message_buffer, clipboard);
     let terminal = Arc::new(FairMutex::new(terminal));
 
     // Find the window ID for setting $WINDOWID

@@ -18,7 +18,7 @@ use std::ops::{Index, IndexMut, Range, RangeInclusive};
 use std::time::{Duration, Instant};
 use std::{io, mem, ptr};
 
-use copypasta::{Clipboard, Load, Store};
+use arraydeque::ArrayDeque;
 use font::{self, RasterizedGlyph, Size};
 use glutin::MouseCursor;
 use unicode_width::UnicodeWidthChar;
@@ -26,6 +26,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::ansi::{
     self, Attr, CharsetIndex, Color, CursorStyle, Handler, NamedColor, StandardCharset,
 };
+use crate::clipboard::{Clipboard, ClipboardType};
 use crate::config::{Config, VisualBellAnimation};
 use crate::cursor;
 use crate::grid::{
@@ -193,16 +194,16 @@ impl<'a> RenderableCellsIter<'a> {
             let locations = match (start_line, end_line) {
                 (ViewportPosition::Visible(start_line), ViewportPosition::Visible(end_line)) => {
                     Some((start_line, loc.start.col, end_line, loc.end.col))
-                },
+                }
                 (ViewportPosition::Visible(start_line), ViewportPosition::Above) => {
                     Some((start_line, loc.start.col, Line(0), Column(0)))
-                },
+                }
                 (ViewportPosition::Below, ViewportPosition::Visible(end_line)) => {
                     Some((grid.num_lines(), Column(0), end_line, loc.end.col))
-                },
+                }
                 (ViewportPosition::Below, ViewportPosition::Above) => {
                     Some((grid.num_lines(), Column(0), Line(0), Column(0)))
-                },
+                }
                 _ => None,
             };
 
@@ -320,7 +321,7 @@ impl RenderableCell {
                             && config.colors().primary.bright_foreground.is_none() =>
                     {
                         colors[NamedColor::DimForeground]
-                    },
+                    }
                     // Draw bold text in bright colors *and* contains bold flag.
                     (true, cell::Flags::BOLD) => colors[ansi.to_bright()],
                     // Cell is marked as dim and not bold
@@ -328,7 +329,7 @@ impl RenderableCell {
                     // None of the above, keep original color.
                     _ => colors[ansi],
                 }
-            },
+            }
             Color::Indexed(idx) => {
                 let idx = match (
                     config.draw_bold_text_with_bright_colors(),
@@ -342,7 +343,7 @@ impl RenderableCell {
                 };
 
                 colors[idx]
-            },
+            }
         }
     }
 
@@ -593,7 +594,7 @@ impl VisualBell {
                     self.start_time = None;
                 }
                 false
-            },
+            }
             None => true,
         }
     }
@@ -638,12 +639,12 @@ impl VisualBell {
                 let inverse_intensity = match self.animation {
                     VisualBellAnimation::Ease | VisualBellAnimation::EaseOut => {
                         cubic_bezier(0.25, 0.1, 0.25, 1.0, time)
-                    },
+                    }
                     VisualBellAnimation::EaseOutSine => cubic_bezier(0.39, 0.575, 0.565, 1.0, time),
                     VisualBellAnimation::EaseOutQuad => cubic_bezier(0.25, 0.46, 0.45, 0.94, time),
                     VisualBellAnimation::EaseOutCubic => {
                         cubic_bezier(0.215, 0.61, 0.355, 1.0, time)
-                    },
+                    }
                     VisualBellAnimation::EaseOutQuart => cubic_bezier(0.165, 0.84, 0.44, 1.0, time),
                     VisualBellAnimation::EaseOutQuint => cubic_bezier(0.23, 1.0, 0.32, 1.0, time),
                     VisualBellAnimation::EaseOutExpo => cubic_bezier(0.19, 1.0, 0.22, 1.0, time),
@@ -654,7 +655,7 @@ impl VisualBell {
                 // Since we want the `intensity` of the VisualBell to decay over
                 // `time`, we subtract the `inverse_intensity` from 1.0.
                 1.0 - inverse_intensity
-            },
+            }
         }
     }
 
@@ -755,6 +756,9 @@ pub struct Term {
 
     /// Hint that Alacritty should be closed
     should_exit: bool,
+
+    /// Clipboard access coupled to the active window
+    clipboard: Clipboard,
 }
 
 /// Terminal size info
@@ -842,7 +846,12 @@ impl Term {
         self.next_mouse_cursor.take()
     }
 
-    pub fn new(config: &Config, size: SizeInfo, message_buffer: MessageBuffer) -> Term {
+    pub fn new(
+        config: &Config,
+        size: SizeInfo,
+        message_buffer: MessageBuffer,
+        clipboard: Clipboard,
+    ) -> Term {
         let num_cols = size.cols();
         let num_lines = size.lines();
 
@@ -888,6 +897,7 @@ impl Term {
             auto_scroll: config.scrolling().auto_scroll,
             message_buffer,
             should_exit: false,
+            clipboard,
         }
     }
 
@@ -1025,7 +1035,7 @@ impl Term {
             // Selection within single line
             0 => {
                 res.append(&self.grid, &self.tabs, start.line, start.col..end.col);
-            },
+            }
 
             // Selection ends on line following start
             1 => {
@@ -1034,7 +1044,7 @@ impl Term {
 
                 // Starting line
                 res.append(&self.grid, &self.tabs, start.line, Column(0)..start.col);
-            },
+            }
 
             // Multi line selection
             _ => {
@@ -1048,7 +1058,7 @@ impl Term {
 
                 // Starting line
                 res.append(&self.grid, &self.tabs, start.line, Column(0)..start.col);
-            },
+            }
         }
 
         Some(res)
@@ -1316,6 +1326,10 @@ impl Term {
         self.grid.url_highlight = None;
         self.dirty = true;
     }
+
+    pub fn clipboard(&mut self) -> &mut Clipboard {
+        &mut self.clipboard
+    }
 }
 
 impl ansi::TermInfo for Term {
@@ -1544,11 +1558,11 @@ impl ansi::Handler for Term {
         match arg {
             5 => {
                 let _ = writer.write_all(b"\x1b[0n");
-            },
+            }
             6 => {
                 let pos = self.cursor.point;
                 let _ = write!(writer, "\x1b[{};{}R", pos.line + 1, pos.col + 1);
-            },
+            }
             _ => debug!("unknown device status query: {}", arg),
         };
     }
@@ -1799,19 +1813,19 @@ impl ansi::Handler for Term {
                 for cell in &mut row[col..] {
                     cell.reset(&template);
                 }
-            },
+            }
             ansi::LineClearMode::Left => {
                 let row = &mut self.grid[self.cursor.point.line];
                 for cell in &mut row[..=col] {
                     cell.reset(&template);
                 }
-            },
+            }
             ansi::LineClearMode::All => {
                 let row = &mut self.grid[self.cursor.point.line];
                 for cell in &mut row[..] {
                     cell.reset(&template);
                 }
-            },
+            }
         }
     }
 
@@ -1834,11 +1848,7 @@ impl ansi::Handler for Term {
     /// Set the clipboard
     #[inline]
     fn set_clipboard(&mut self, string: &str) {
-        Clipboard::new().and_then(|mut clipboard| clipboard.store_primary(string)).unwrap_or_else(
-            |err| {
-                warn!("Error storing selection to clipboard: {}", err);
-            },
-        );
+        self.clipboard.store(ClipboardType::Primary, string);
     }
 
     #[inline]
@@ -1861,7 +1871,7 @@ impl ansi::Handler for Term {
                         .region_mut((self.cursor.point.line + 1)..)
                         .each(|cell| cell.reset(&template));
                 }
-            },
+            }
             ansi::ClearMode::All => self.grid.region_mut(..).each(|c| c.reset(&template)),
             ansi::ClearMode::Above => {
                 // If clearing more than one line
@@ -1876,7 +1886,7 @@ impl ansi::Handler for Term {
                 for cell in &mut self.grid[self.cursor.point.line][..end] {
                     cell.reset(&template);
                 }
-            },
+            }
             ansi::ClearMode::Saved => self.grid.clear_history(),
         }
     }
@@ -1888,10 +1898,10 @@ impl ansi::Handler for Term {
             ansi::TabulationClearMode::Current => {
                 let column = self.cursor.point.col;
                 self.tabs[column] = false;
-            },
+            }
             ansi::TabulationClearMode::All => {
                 self.tabs.clear_all();
-            },
+            }
         }
     }
 
@@ -1941,7 +1951,7 @@ impl ansi::Handler for Term {
                 self.cursor.template.fg = Color::Named(NamedColor::Foreground);
                 self.cursor.template.bg = Color::Named(NamedColor::Background);
                 self.cursor.template.flags = cell::Flags::empty();
-            },
+            }
             Attr::Reverse => self.cursor.template.flags.insert(cell::Flags::INVERSE),
             Attr::CancelReverse => self.cursor.template.flags.remove(cell::Flags::INVERSE),
             Attr::Bold => self.cursor.template.flags.insert(cell::Flags::BOLD),
@@ -1949,7 +1959,7 @@ impl ansi::Handler for Term {
             Attr::Dim => self.cursor.template.flags.insert(cell::Flags::DIM),
             Attr::CancelBoldDim => {
                 self.cursor.template.flags.remove(cell::Flags::BOLD | cell::Flags::DIM)
-            },
+            }
             Attr::Italic => self.cursor.template.flags.insert(cell::Flags::ITALIC),
             Attr::CancelItalic => self.cursor.template.flags.remove(cell::Flags::ITALIC),
             Attr::Underscore => self.cursor.template.flags.insert(cell::Flags::UNDERLINE),
@@ -1960,7 +1970,7 @@ impl ansi::Handler for Term {
             Attr::CancelStrike => self.cursor.template.flags.remove(cell::Flags::STRIKEOUT),
             _ => {
                 debug!("Term got unhandled attr: {:?}", attr);
-            },
+            }
         }
     }
 
@@ -1975,21 +1985,21 @@ impl ansi::Handler for Term {
                     self.swap_alt();
                     self.save_cursor_position();
                 }
-            },
+            }
             ansi::Mode::ShowCursor => self.mode.insert(TermMode::SHOW_CURSOR),
             ansi::Mode::CursorKeys => self.mode.insert(TermMode::APP_CURSOR),
             ansi::Mode::ReportMouseClicks => {
                 self.mode.insert(TermMode::MOUSE_REPORT_CLICK);
                 self.set_mouse_cursor(MouseCursor::Default);
-            },
+            }
             ansi::Mode::ReportCellMouseMotion => {
                 self.mode.insert(TermMode::MOUSE_DRAG);
                 self.set_mouse_cursor(MouseCursor::Default);
-            },
+            }
             ansi::Mode::ReportAllMouseMotion => {
                 self.mode.insert(TermMode::MOUSE_MOTION);
                 self.set_mouse_cursor(MouseCursor::Default);
-            },
+            }
             ansi::Mode::ReportFocusInOut => self.mode.insert(TermMode::FOCUS_IN_OUT),
             ansi::Mode::BracketedPaste => self.mode.insert(TermMode::BRACKETED_PASTE),
             ansi::Mode::SgrMouse => self.mode.insert(TermMode::SGR_MOUSE),
@@ -2000,7 +2010,7 @@ impl ansi::Handler for Term {
             ansi::Mode::Insert => self.mode.insert(TermMode::INSERT), // heh
             ansi::Mode::BlinkingCursor => {
                 trace!("... unimplemented mode");
-            },
+            }
         }
     }
 
@@ -2015,21 +2025,21 @@ impl ansi::Handler for Term {
                     self.swap_alt();
                     self.restore_cursor_position();
                 }
-            },
+            }
             ansi::Mode::ShowCursor => self.mode.remove(TermMode::SHOW_CURSOR),
             ansi::Mode::CursorKeys => self.mode.remove(TermMode::APP_CURSOR),
             ansi::Mode::ReportMouseClicks => {
                 self.mode.remove(TermMode::MOUSE_REPORT_CLICK);
                 self.set_mouse_cursor(MouseCursor::Text);
-            },
+            }
             ansi::Mode::ReportCellMouseMotion => {
                 self.mode.remove(TermMode::MOUSE_DRAG);
                 self.set_mouse_cursor(MouseCursor::Text);
-            },
+            }
             ansi::Mode::ReportAllMouseMotion => {
                 self.mode.remove(TermMode::MOUSE_MOTION);
                 self.set_mouse_cursor(MouseCursor::Text);
-            },
+            }
             ansi::Mode::ReportFocusInOut => self.mode.remove(TermMode::FOCUS_IN_OUT),
             ansi::Mode::BracketedPaste => self.mode.remove(TermMode::BRACKETED_PASTE),
             ansi::Mode::SgrMouse => self.mode.remove(TermMode::SGR_MOUSE),
@@ -2040,7 +2050,7 @@ impl ansi::Handler for Term {
             ansi::Mode::Insert => self.mode.remove(TermMode::INSERT),
             ansi::Mode::BlinkingCursor => {
                 trace!("... unimplemented mode");
-            },
+            }
         }
     }
 
@@ -2119,20 +2129,20 @@ impl IndexMut<Column> for TabStops {
 
 #[cfg(test)]
 mod tests {
+    use std::mem;
+
+    use font::Size;
     use serde_json;
 
-    use super::{Cell, SizeInfo, Term};
-    use crate::term::cell;
-
     use crate::ansi::{self, CharsetIndex, Handler, StandardCharset};
+    use crate::clipboard::Clipboard;
     use crate::config::Config;
     use crate::grid::{Grid, Scroll};
     use crate::index::{Column, Line, Point, Side};
     use crate::input::FONT_SIZE_STEP;
     use crate::message_bar::MessageBuffer;
     use crate::selection::Selection;
-    use font::Size;
-    use std::mem;
+    use crate::term::{cell, Cell, SizeInfo, Term};
 
     #[test]
     fn semantic_selection_works() {
@@ -2145,7 +2155,8 @@ mod tests {
             padding_y: 0.0,
             dpr: 1.0,
         };
-        let mut term = Term::new(&Default::default(), size, MessageBuffer::new());
+        let mut term =
+            Term::new(&Default::default(), size, MessageBuffer::new(), Clipboard::new_nop());
         let mut grid: Grid<Cell> = Grid::new(Line(3), Column(5), 0, Cell::default());
         for i in 0..5 {
             for j in 0..2 {
@@ -2189,7 +2200,8 @@ mod tests {
             padding_y: 0.0,
             dpr: 1.0,
         };
-        let mut term = Term::new(&Default::default(), size, MessageBuffer::new());
+        let mut term =
+            Term::new(&Default::default(), size, MessageBuffer::new(), Clipboard::new_nop());
         let mut grid: Grid<Cell> = Grid::new(Line(1), Column(5), 0, Cell::default());
         for i in 0..5 {
             grid[Line(0)][Column(i)].c = 'a';
@@ -2214,7 +2226,8 @@ mod tests {
             padding_y: 0.0,
             dpr: 1.0,
         };
-        let mut term = Term::new(&Default::default(), size, MessageBuffer::new());
+        let mut term =
+            Term::new(&Default::default(), size, MessageBuffer::new(), Clipboard::new_nop());
         let mut grid: Grid<Cell> = Grid::new(Line(3), Column(3), 0, Cell::default());
         for l in 0..3 {
             if l != 1 {
@@ -2258,7 +2271,8 @@ mod tests {
             padding_y: 0.0,
             dpr: 1.0,
         };
-        let mut term = Term::new(&Default::default(), size, MessageBuffer::new());
+        let mut term =
+            Term::new(&Default::default(), size, MessageBuffer::new(), Clipboard::new_nop());
         let cursor = Point::new(Line(0), Column(0));
         term.configure_charset(CharsetIndex::G0, StandardCharset::SpecialCharacterAndLineDrawing);
         term.input('a');
@@ -2277,7 +2291,7 @@ mod tests {
             dpr: 1.0,
         };
         let config: Config = Default::default();
-        let mut term: Term = Term::new(&config, size, MessageBuffer::new());
+        let mut term: Term = Term::new(&config, size, MessageBuffer::new(), Clipboard::new_nop());
         term.change_font_size(font_size);
 
         let expected_font_size: Size = config.font().size() + Size::new(font_size);
@@ -2306,7 +2320,7 @@ mod tests {
             dpr: 1.0,
         };
         let config: Config = Default::default();
-        let mut term: Term = Term::new(&config, size, MessageBuffer::new());
+        let mut term: Term = Term::new(&config, size, MessageBuffer::new(), Clipboard::new_nop());
 
         term.change_font_size(-100.0);
 
@@ -2326,7 +2340,7 @@ mod tests {
             dpr: 1.0,
         };
         let config: Config = Default::default();
-        let mut term: Term = Term::new(&config, size, MessageBuffer::new());
+        let mut term: Term = Term::new(&config, size, MessageBuffer::new(), Clipboard::new_nop());
 
         term.change_font_size(10.0);
         term.reset_font_size();
@@ -2347,7 +2361,7 @@ mod tests {
             dpr: 1.0,
         };
         let config: Config = Default::default();
-        let mut term: Term = Term::new(&config, size, MessageBuffer::new());
+        let mut term: Term = Term::new(&config, size, MessageBuffer::new(), Clipboard::new_nop());
 
         // Add one line of scrollback
         term.grid.scroll_up(&(Line(0)..Line(1)), Line(1), &Cell::default());
@@ -2415,7 +2429,7 @@ mod benches {
 
         let config = Config::default();
 
-        let mut terminal = Term::new(&config, size, MessageBuffer::new());
+        let mut terminal = Term::new(&config, size, MessageBuffer::new(), Clipboard::new_nop());
         mem::swap(&mut terminal.grid, &mut grid);
 
         let metrics = font::Metrics {
